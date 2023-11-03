@@ -24,7 +24,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	log "github.com/sirupsen/logrus"
@@ -145,14 +144,14 @@ func generateKubeConfig(cfg *userInfo) clientcmdapi.Config {
 
 func loginRequired(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		session, err := store.Get(r, "gangly_id_token")
+		ganglyIdTokenSess, err := sessionManager.Session.Get(r, "gangly_id_token")
 		if err != nil {
 			log.Errorf("Unable to get session : %v", err)
 			http.Redirect(w, r, clusterCfg.GetRootPathPrefix(), http.StatusTemporaryRedirect)
 			return
 		}
 
-		if session.Values["id_token"] == nil {
+		if ganglyIdTokenSess.Values["id_token"] == nil {
 			log.Error("id_token is nil")
 			http.Redirect(w, r, clusterCfg.GetRootPathPrefix(), http.StatusTemporaryRedirect)
 			return
@@ -229,16 +228,17 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	state := base64.URLEncoding.EncodeToString(stateBytes)
 
-	values := map[string]interface{}{
-		"state":       state,
-		"clusterName": clusterName,
-	}
-
 	// Utiliser initSession pour initialiser la session.
-	if err := initSession(w, r, "gangly", values); err != nil {
-		log.Errorf("Got an error initializing the session gangly: %s", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
+	ganglySess, err := sessionManager.Session.Get(r, "gangly")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	ganglySess.Values["state"] = state
+	ganglySess.Values["clusterName"] = clusterName
+	err = ganglySess.Save(r, w)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 
 	// Construit l'URL d'authentification et redirige le client vers le fournisseur OIDC.
@@ -251,26 +251,10 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func logoutHandler(w http.ResponseWriter, r *http.Request) {
-	// Ici, vous effacerez la session et les cookies.
-	err := clearSession(w, r, "gangly")
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	err = clearSession(w, r, "gangly_id_token")
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	err = clearSession(w, r, "gangly_refresh_token")
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
 
-	deleteCookie(w, "gangly", clusterCfg.ServeTLS) // Mettez à jour selon votre configuration TLS.
-	deleteCookie(w, "gangly_id_token", clusterCfg.ServeTLS)
-	deleteCookie(w, "gangly_refresh_token", clusterCfg.ServeTLS)
+	sessionManager.Cleanup(w, r, "gangly")
+	sessionManager.Cleanup(w, r, "gangly_id_token")
+	sessionManager.Cleanup(w, r, "gangly_refresh_token")
 
 	// Redirection après logout.
 	http.Redirect(w, r, clusterCfg.GetRootPathPrefix(), http.StatusSeeOther)
@@ -280,7 +264,7 @@ func callbackHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := context.WithValue(r.Context(), oauth2.HTTPClient, transportConfig.HTTPClient)
 
 	// Charger la session principale.
-	session, err := store.Get(r, "gangly")
+	session, err := sessionManager.Session.Get(r, "gangly")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -324,32 +308,34 @@ func callbackHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Utiliser initSession pour enregistrer le ID token dans sa session.
-	err = initSession(w, r, "gangly_id_token", map[string]interface{}{"id_token": rawIDToken})
+	ganglyIdTokenSess, err := sessionManager.Session.Get(r, "gangly_id_token")
 	if err != nil {
-		log.Errorf("Could not initialize id token session gangly_id_token: %v", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-
-	// Utiliser initSession pour enregistrer le refresh token dans sa session.
-	err = initSession(w, r, "gangly_refresh_token", map[string]interface{}{"refresh_token": oauth2Token.RefreshToken})
+	ganglyIdTokenSess.Values["id_token"] = rawIDToken
+	err = ganglyIdTokenSess.Save(r, w)
 	if err != nil {
-		log.Errorf("Could not initialize refresh token session gangly_refresh_token: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+
+	ganglyRefreshTokenSess, err := sessionManager.Session.Get(r, "gangly_refresh_token")
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-
-	fmt.Println("Redirection vers commandline")
+	ganglyRefreshTokenSess.Values["refresh_token"] = oauth2Token.RefreshToken
+	err = ganglyRefreshTokenSess.Save(r, w)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 
 	// Rediriger vers la page de ligne de commande avec le nom du cluster comme paramètre.
 	http.Redirect(w, r, fmt.Sprintf("%s/commandline?cluster=%s", clusterCfg.HTTPPath, clusterName), http.StatusSeeOther)
 }
 
 func commandlineHandler(w http.ResponseWriter, r *http.Request) {
-	fmt.Println("Génération de la commandeLine")
 	info := generateInfo(w, r)
-	fmt.Println(info)
 	if info == nil {
 		// generateInfo writes to the ResponseWriter if it encounters an error.
 		// TODO(abrand): Refactor this.
@@ -384,7 +370,7 @@ func kubeConfigHandler(w http.ResponseWriter, r *http.Request) {
 
 func generateInfo(w http.ResponseWriter, r *http.Request) *userInfo {
 	// Load the session.
-	sessionIdToken, err := store.Get(r, "gangly_id_token") // 'session-name' devrait être le nom générique de votre session.
+	sessionIdToken, err := sessionManager.Session.Get(r, "gangly_id_token")
 	if err != nil {
 		log.Errorf("Error retrieving session: %v", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -398,7 +384,7 @@ func generateInfo(w http.ResponseWriter, r *http.Request) *userInfo {
 		return nil
 	}
 
-	sessionRefreshToken, err := store.Get(r, "gangly_refresh_token") // 'session-name' devrait être le nom générique de votre session.
+	sessionRefreshToken, err := sessionManager.Session.Get(r, "gangly_refresh_token")
 	if err != nil {
 		log.Errorf("Error retrieving session: %v", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -450,10 +436,6 @@ func generateInfo(w http.ResponseWriter, r *http.Request) *userInfo {
 
 	kubeCfgUser := strings.Join([]string{username, cfg.ClusterName}, "@")
 
-	if cfg.EmailClaim != "" {
-		log.Warn("using the Email Claim config setting is deprecated. Gangly uses `UsernameClaim@ClusterName`. This field will be removed in a future version.")
-	}
-
 	issuerURL, ok := claims["iss"].(string)
 	if !ok {
 		http.Error(w, "Could not parse Issuer URL claim", http.StatusInternalServerError)
@@ -492,47 +474,4 @@ func getClusterConfig(clusterName string) (config.Config, bool) {
 		}
 	}
 	return config.Config{}, false
-}
-
-// Cette fonction initie une session pour l'utilisateur.
-func initSession(w http.ResponseWriter, r *http.Request, sessionName string, values map[string]interface{}) error {
-	session, err := store.Get(r, sessionName)
-	if err != nil {
-		return err
-	}
-
-	for key, value := range values {
-		session.Values[key] = value
-	}
-
-	return session.Save(r, w)
-}
-
-// Cette fonction efface la session de l'utilisateur.
-func clearSession(w http.ResponseWriter, r *http.Request, sessionName string) error {
-	session, err := store.Get(r, sessionName)
-	if err != nil {
-		return err
-	}
-
-	// Réinitialisation des valeurs de la session.
-	session.Values = make(map[interface{}]interface{})
-
-	// Mise à jour de la session pour qu'elle expire immédiatement.
-	session.Options.MaxAge = -1
-
-	return session.Save(r, w)
-}
-
-// deleteCookie est une fonction d'assistance pour supprimer les cookies.
-func deleteCookie(w http.ResponseWriter, name string, secure bool) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     name,
-		Value:    "",
-		Path:     "/",
-		Expires:  time.Unix(0, 0),
-		MaxAge:   -1,
-		HttpOnly: true,
-		Secure:   secure,
-	})
 }

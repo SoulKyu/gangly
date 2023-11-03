@@ -30,6 +30,7 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/soulkyu/gangly/assets"
 	"github.com/soulkyu/gangly/internal/config"
+	"github.com/soulkyu/gangly/internal/session"
 	"golang.org/x/oauth2"
 )
 
@@ -38,6 +39,8 @@ var cfg *config.Config
 var oauth2Cfg *oauth2.Config
 
 var store *sessions.CookieStore
+
+var sessionManager *session.Session
 
 var transportConfig *config.TransportConfig
 var provider *oidc.Provider
@@ -84,6 +87,7 @@ func main() {
 	}
 
 	store = sessions.NewCookieStore([]byte(clusterCfg.SessionSecurityKey))
+	sessionManager = session.New(clusterCfg.SessionSecurityKey, clusterCfg.SessionSalt)
 
 	http.HandleFunc(clusterCfg.GetRootPathPrefix(), httpLogger(rootPathHandler(clustersHome)))
 	http.HandleFunc(fmt.Sprintf("%s/login", clusterCfg.HTTPPath), httpLogger(loginHandler))
@@ -131,7 +135,6 @@ func main() {
 	// start up the http server
 	go func() {
 		log.Infof("Gangly started! Listening on: %s", bindAddr)
-
 		// exit with FATAL logging why we could not start
 		// example: FATA[0000] listen tcp 0.0.0.0:8080: bind: address already in use
 		if clusterCfg.ServeTLS {

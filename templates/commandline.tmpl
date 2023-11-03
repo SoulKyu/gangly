@@ -27,7 +27,7 @@
     <p class="flow-text">In order to get command-line access to the <strong>{{ .ClusterName }}</strong> Kubernetes
         cluster, you will need to configure OpenID Connect (OIDC) authentication for your client.</p>
     <p>
-        <a href="{{ .HTTPPath }}/kubeconf" class="waves-effect waves-light btn-large btn-cluster">Download Kubeconfig</a>
+        <a href="{{ .HTTPPath }}/kubeconf?cluster={{ .ClusterName }}" class="waves-effect waves-light btn-large btn-cluster">Download Kubeconfig</a>
     </p>
 </div>
 
