@@ -1,0 +1,8 @@
+*.swp
+*.swo
+config.yml
+/gangly
+vendor/
+.idea/
+gangly.kubeconfig
+deploy/

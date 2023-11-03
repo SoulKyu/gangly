@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gangly
+  namespace: gangly
+  labels:
+    app: gangly
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gangly
+  strategy:
+  template:
+    metadata:
+      labels:
+        app: gangly
+        revision: "1"
+    spec:
+      containers:
+      - name: gangly
+        image: gcr.io/heptio-images/gangly:v3.2.0
+        imagePullPolicy: Always
+        command: ["gangly", "-config", "/gangly/gangly.yaml"]
+        env:
+        - name: GANGLY_SESSION_SECURITY_KEY
+          valueFrom:
+            secretKeyRef:
+              name: gangly-key
+              key: sessionkey
+        - name: GANGLY_SESSION_SALT
+          valueFrom:
+            secretKeyRef:
+              name: gangly-key
+              key: sessionsalt
+        ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "200m"
+            memory: "512Mi"
+        volumeMounts:
+        - name: gangly
+          mountPath: /gangly/
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 20
+          timeoutSeconds: 1
+          periodSeconds: 60
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          timeoutSeconds: 1
+          periodSeconds: 10
+          failureThreshold: 3
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+      volumes:
+      - name: gangly
+        configMap:
+          name: gangly
